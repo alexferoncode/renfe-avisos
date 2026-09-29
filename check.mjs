@@ -161,18 +161,26 @@ async function main() {
           console.log(`búsqueda ${n}: intento ${intento} falló: ${e.message.split('\n')[0]}`);
         }
       }
-      if (!delDia) { errores++; continue; }
+      if (!delDia) {
+        errores++;
+        for (const t of trenes) resumen.trenes.push({ k: clave(t), e: 'error' });
+        continue;
+      }
 
       for (const t of trenes) {
         const r = evaluar(delDia, t.hora);
         const antes = estado.trenes[clave(t)];
         console.log(`tren ${t.hora}: ${r.estado}${antes && antes !== r.estado ? ` (antes: ${antes})` : ''}`);
+        let avisado = false;
         if (r.estado === 'disponible' && antes !== 'disponible') {
           await telegram(`🚆 <b>¡Hay plazas!</b>\n${describir(t)}\n\nEntra en la app de Renfe y sácalo. Luego quítalo de la lista.`);
+          avisado = true;
         } else if (r.estado === 'no_encontrado' && antes !== 'no_encontrado') {
           await telegram(`⚠️ No encuentro el tren de las ${t.hora} en Renfe para ${describir(t)}. ¿Ha cambiado el horario? Revisa la lista.`);
+          avisado = true;
         }
         estado.trenes[clave(t)] = r.estado;
+        resumen.trenes.push({ k: clave(t), e: r.estado, ...(avisado && { avisado }) });
       }
     }
   } finally {
@@ -186,8 +194,20 @@ async function main() {
   guardarEstado(estado);
 }
 
-main().catch(async e => {
+// Resumen de la ejecución para el historial de la web. Se publica como anotación de GitHub
+// (la web la lee con la API de check-runs), en una sola línea de JSON.
+const resumen = { trenes: [], error: null };
+
+function publicarResumen() {
+  const linea = JSON.stringify(resumen).replace(/%/g, '%25');
+  if (process.env.GITHUB_ACTIONS) console.log(`::${resumen.error ? 'error' : 'notice'} title=resumen::${linea}`);
+  else console.log('resumen:', linea);
+}
+
+main().then(publicarResumen, async e => {
   console.error('Error:', e.message);
+  resumen.error = e.message.split('\n')[0];
+  publicarResumen();
   const estado = leerEstado();
   estado.fallosSeguidos = (estado.fallosSeguidos ?? 0) + 1;
   if (estado.fallosSeguidos >= AVISAR_FALLO_TRAS && !estado.avisoFallo) {

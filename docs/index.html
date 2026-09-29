@@ -58,6 +58,23 @@
   details summary { cursor: pointer; color: var(--muted); font-size: .9rem; }
   details[open] summary { margin-bottom: 12px; }
   .hint { font-size: .85rem; color: var(--muted); margin: 8px 0 0; }
+  .estado h2 { margin: 0; }
+  .run { border-top: 1px solid var(--line); }
+  .run:first-child { border-top: 0; }
+  .run summary { list-style: none; display: flex; align-items: baseline; gap: 8px; padding: 12px 0; color: var(--text); font-size: .95rem; }
+  .run summary::-webkit-details-marker { display: none; }
+  .run summary .cuando { font-weight: 600; white-space: nowrap; }
+  .run summary .tipo { color: var(--muted); font-size: .85rem; }
+  .run summary .res { margin-left: auto; text-align: right; font-size: .88rem; }
+  .run ul { padding: 0 0 12px 15px; }
+  .run li { border: 0; padding: 4px 0; font-size: .9rem; justify-content: space-between; }
+  .run li .tren { color: var(--muted); }
+  .e-disponible { color: var(--ok); font-weight: 600; }
+  .e-completo { color: var(--muted); }
+  .e-no_encontrado, .e-error, .e-err { color: var(--danger); }
+  .e-curso { color: var(--warn); }
+  .run .nota { margin: 0 0 12px 15px; font-size: .88rem; color: var(--muted); }
+  .mas { width: 100%; margin-top: 8px; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -110,10 +127,12 @@
 
     <section class="card">
       <div class="estado">
-        <div id="ultima"><span class="dot"></span>Cargando estado…</div>
+        <h2>Historial</h2>
         <button class="secondary" id="ahora">Comprobar ahora</button>
       </div>
       <p class="msg" id="estadoMsg"></p>
+      <div id="historial"><p class="vacio">Cargando…</p></div>
+      <button class="secondary mas" id="refrescar">Actualizar</button>
     </section>
 
     <details class="card">
@@ -228,30 +247,92 @@ function pintar() {
   });
 }
 
-function haceCuanto(fecha) {
-  const min = Math.round((Date.now() - new Date(fecha)) / 60000);
-  if (min < 1) return 'ahora mismo';
-  if (min < 60) return `hace ${min} min`;
-  const h = Math.floor(min / 60);
-  return h < 24 ? `hace ${h} h` : `hace ${Math.floor(h / 24)} días`;
+const ESTADOS = { disponible: '¡Disponible!', completo: 'Completo', no_encontrado: 'No encontrado', error: 'Error al consultar' };
+const detalles = new Map(); // run id → resumen (las ejecuciones terminadas no cambian)
+
+function cuando(fecha) {
+  const f = d => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Madrid', year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+  const d = new Date(fecha);
+  const hora = d.toLocaleTimeString('es-ES', { timeZone: 'Europe/Madrid', hour: '2-digit', minute: '2-digit' });
+  if (f(d) === f(new Date())) return `Hoy ${hora}`;
+  if (f(d) === f(new Date(Date.now() - 864e5))) return `Ayer ${hora}`;
+  return `${d.toLocaleDateString('es-ES', { timeZone: 'Europe/Madrid', day: 'numeric', month: 'short' })} ${hora}`;
 }
 
-async function cargarEstado() {
+function describirClave(k) {
+  const [fecha, origen, destino, hora] = k.split('|');
+  const dia = new Date(`${fecha}T12:00:00Z`).toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
+  return `${dia} · ${hora} ${NOMBRES[origen] ?? origen} → ${NOMBRES[destino] ?? destino}`;
+}
+
+// El script deja en cada ejecución una anotación "resumen" con el estado de cada tren.
+async function resumenDe(run) {
+  if (detalles.has(run.id)) return detalles.get(run.id);
+  const jobs = await (await gh(`/actions/runs/${run.id}/jobs`)).json();
+  const job = jobs.jobs?.[0];
+  let resumen = null;
+  if (job) {
+    const anots = await (await gh(`/check-runs/${job.id}/annotations`)).json();
+    const a = Array.isArray(anots) && anots.find(x => x.title === 'resumen');
+    if (a) { try { resumen = JSON.parse(a.message); } catch {} }
+  }
+  detalles.set(run.id, resumen);
+  return resumen;
+}
+
+function el(tag, clase, texto) {
+  const e = document.createElement(tag);
+  if (clase) e.className = clase;
+  if (texto != null) e.textContent = texto;
+  return e;
+}
+
+async function cargarHistorial() {
+  const cont = $('historial');
   try {
-    const res = await gh(`/actions/workflows/${WORKFLOW}/runs?per_page=1`);
-    const run = res.status === 404 ? null : (await res.json()).workflow_runs?.[0];
-    const el = $('ultima');
-    el.replaceChildren();
-    const dot = document.createElement('span');
-    dot.className = 'dot';
-    let texto;
-    if (!run) { texto = 'Aún no se ha ejecutado'; }
-    else if (run.status !== 'completed') { dot.classList.add('warn'); texto = 'Comprobando ahora…'; }
-    else if (run.conclusion === 'success') { dot.classList.add('ok'); texto = `Última comprobación ${haceCuanto(run.updated_at)}`; }
-    else { dot.classList.add('err'); texto = `La última ejecución falló (${haceCuanto(run.updated_at)})`; }
-    el.append(dot, document.createTextNode(texto));
+    const res = await gh(`/actions/workflows/${WORKFLOW}/runs?per_page=12`);
+    const runs = res.status === 404 ? [] : (await res.json()).workflow_runs || [];
+    if (!runs.length) { cont.replaceChildren(el('p', 'vacio', 'Aún no hay ejecuciones.')); return; }
+    const resumenes = await Promise.all(runs.map(r => (r.status === 'completed' ? resumenDe(r).catch(() => null) : null)));
+    const abiertos = new Set([...cont.querySelectorAll('details[open]')].map(d => d.dataset.id));
+    const primeraTerminada = runs.findIndex(r => r.status === 'completed');
+    cont.replaceChildren(...runs.map((run, i) => {
+      const s = resumenes[i];
+      const det = el('details', 'run');
+      det.dataset.id = run.id;
+      if (abiertos.has(String(run.id)) || (!abiertos.size && i === primeraTerminada)) det.open = true;
+      const sum = el('summary');
+      const tipo = /manual/i.test(run.display_title) ? 'Manual'
+        : /autom/i.test(run.display_title) || run.event === 'schedule' ? 'Automática' : '';
+      let res;
+      if (run.status !== 'completed') res = el('span', 'res e-curso', 'En curso…');
+      else if (run.conclusion !== 'success') res = el('span', 'res e-err', 'Falló');
+      else if (!s) res = el('span', 'res e-completo', 'Sin detalle');
+      else if (s.error) res = el('span', 'res e-err', 'Error');
+      else {
+        const disp = s.trenes.filter(t => t.e === 'disponible').length;
+        const malos = s.trenes.filter(t => t.e === 'error' || t.e === 'no_encontrado').length;
+        res = el('span', `res ${disp ? 'e-disponible' : malos ? 'e-err' : 'e-completo'}`,
+          !s.trenes.length ? 'Sin trenes' : disp ? `${disp} disponible${disp > 1 ? 's' : ''}` : malos ? 'Con problemas' : 'Todo completo');
+      }
+      sum.append(el('span', 'cuando', cuando(run.created_at)), el('span', 'tipo', tipo), res);
+      det.append(sum);
+      if (s?.error) det.append(el('p', 'nota', s.error));
+      if (s?.trenes.length) {
+        const ul = el('ul');
+        for (const t of s.trenes) {
+          const li = el('li');
+          li.append(el('span', 'tren', describirClave(t.k)), el('span', `e-${t.e}`, (ESTADOS[t.e] ?? t.e) + (t.avisado ? ' · avisado' : '')));
+          ul.append(li);
+        }
+        det.append(ul);
+      } else if (run.status === 'completed' && !s) {
+        det.append(el('p', 'nota', 'Ejecución anterior al historial, sin detalle.'));
+      }
+      return det;
+    }));
   } catch (e) {
-    mensaje($('estadoMsg'), `No pude leer el estado: ${e.message}`, 'err');
+    cont.replaceChildren(el('p', 'msg err', `No pude leer el historial: ${e.message}`));
   }
 }
 
@@ -271,7 +352,7 @@ async function iniciar() {
   } catch (e) {
     mensaje($('anadirMsg'), `No pude cargar la lista: ${e.message}`, 'err');
   }
-  cargarEstado();
+  cargarHistorial();
 }
 
 // Formulario de añadir
@@ -299,16 +380,21 @@ $('anadir').onclick = async () => {
 
 $('ahora').onclick = async () => {
   $('ahora').disabled = true;
+  const lanzar = body => gh(`/actions/workflows/${WORKFLOW}/dispatches`, { method: 'POST', body: JSON.stringify(body) });
   try {
-    await gh(`/actions/workflows/${WORKFLOW}/dispatches`, { method: 'POST', body: JSON.stringify({ ref: 'main' }) });
-    mensaje($('estadoMsg'), 'Lanzada. Tarda aproximadamente un minuto.', 'ok');
-    setTimeout(cargarEstado, 5000);
+    // "origen: manual" distingue esta ejecución de las automáticas (cron-job.org no lo manda).
+    try { await lanzar({ ref: 'main', inputs: { origen: 'manual' } }); }
+    catch (e) { if (e.message === 'error 422') await lanzar({ ref: 'main' }); else throw e; }
+    mensaje($('estadoMsg'), 'Lanzada. En aproximadamente un minuto aparecerá abajo.', 'ok');
+    for (const s of [4, 20, 45, 70, 100]) setTimeout(cargarHistorial, s * 1000);
   } catch (e) {
     mensaje($('estadoMsg'), `No se pudo lanzar: ${e.message}`, 'err');
   } finally {
     setTimeout(() => { $('ahora').disabled = false; }, 5000);
   }
 };
+
+$('refrescar').onclick = cargarHistorial;
 
 $('guardarToken').onclick = async () => {
   const r = repoPorDefecto() || $('repo').value.trim();
