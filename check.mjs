@@ -106,11 +106,7 @@ function evaluar(trenesDelDia, hora) {
   const candidatos = trenesDelDia.filter(v => v.hora === hora);
   if (!candidatos.length) return { estado: 'no_encontrado' };
   for (const v of candidatos) {
-    const estandar = v.tarifas.filter(t => t.clase === 'T' && !t.soloH);
-    if (!v.completo && !v.soloH && estandar.length) {
-      const min = estandar.map(t => t.precio).sort((a, b) => parseFloat(a.replace(',', '.')) - parseFloat(b.replace(',', '.')))[0];
-      return { estado: 'disponible', desde: min };
-    }
+    if (!v.completo && !v.soloH && v.tarifas.some(t => t.clase === 'T' && !t.soloH)) return { estado: 'disponible' };
   }
   return { estado: 'completo' };
 }
@@ -172,7 +168,7 @@ async function main() {
         const antes = estado.trenes[clave(t)];
         console.log(`tren ${t.hora}: ${r.estado}${antes && antes !== r.estado ? ` (antes: ${antes})` : ''}`);
         if (r.estado === 'disponible' && antes !== 'disponible') {
-          await telegram(`🚆 <b>¡Hay plazas!</b>\n${describir(t)}\nEstándar desde ${r.desde} €\n\nEntra en la app de Renfe y sácalo. Luego quítalo de la lista.`);
+          await telegram(`🚆 <b>¡Hay plazas!</b>\n${describir(t)}\n\nEntra en la app de Renfe y sácalo. Luego quítalo de la lista.`);
         } else if (r.estado === 'no_encontrado' && antes !== 'no_encontrado') {
           await telegram(`⚠️ No encuentro el tren de las ${t.hora} en Renfe para ${describir(t)}. ¿Ha cambiado el horario? Revisa la lista.`);
         }
